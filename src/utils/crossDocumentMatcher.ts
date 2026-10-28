@@ -6,10 +6,50 @@ import {
   ExtractedEntityRecord,
   ExtractedParticipantRecord,
   MatchedParticipantRow,
+  ParsedPageOrSection,
   SingleDocumentOnlyItem,
   UncertainParticipantItem,
   UploadedDocumentPayload,
 } from '../types/analysis';
+
+function getResolvedSections(
+  doc: UploadedDocumentPayload
+): ParsedPageOrSection[] {
+  if (Array.isArray(doc.sections) && doc.sections.length > 0) {
+    return doc.sections;
+  }
+  if (Array.isArray(doc.parsedSections) && doc.parsedSections.length > 0) {
+    return doc.parsedSections;
+  }
+  const raw = (doc.textContent || '').trim();
+  if (!raw) return [];
+  const markerParts = raw
+    .split(/(?=\[(?:Halaman|Bagian|Baris)\s+[^\]]+\])/gi)
+    .map((p) => p.trim())
+    .filter(Boolean);
+  if (markerParts.length > 1 || /^\[(?:Halaman|Bagian|Baris)/i.test(raw)) {
+    return markerParts.map((part, idx) => {
+      const m = part.match(/^\[([^\]]+)\]\s*([\s\S]*)$/);
+      const label = m ? m[1].trim() : `Halaman ${idx + 1}`;
+      const body = m ? m[2].trim() : part;
+      const numMatch = label.match(/(\d+)/);
+      return {
+        locationLabel: label,
+        pageNumber: numMatch ? Number(numMatch[1]) : idx + 1,
+        content: body,
+        charCount: body.length,
+      };
+    });
+  }
+  return [
+    {
+      locationLabel: 'Halaman 1',
+      pageNumber: 1,
+      content: raw,
+      charCount: raw.length,
+    },
+  ];
+}
 
 /**
  * Masks a participant/registration number so sensitive identity numbers are never exposed in full.
@@ -364,7 +404,7 @@ export function extractParticipantsFromDocument(
 
   const seenOnPage = new Set<string>();
 
-  doc.sections.forEach((section, secIdx) => {
+  getResolvedSections(doc).forEach((section, secIdx) => {
     const pageMatch = section.locationLabel.match(/(\d+)/);
     const pageNumber = pageMatch ? Number(pageMatch[1]) : secIdx + 1;
     const lines = section.content
@@ -982,7 +1022,7 @@ function scanCrossDocumentSharedNames(
     }> = [];
     let currentMajor: string | undefined = undefined;
 
-    doc.sections.forEach((sec, idx) => {
+    getResolvedSections(doc).forEach((sec, idx) => {
       const pageNum = sec.pageNumber || idx + 1;
       const lines = sec.content.split('\n');
       for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
@@ -1739,10 +1779,10 @@ export function extractGenericEntitiesFromDocument(
     return { entities, headers, entityTypeLabel };
   }
 
-  // PDF extraction: scan pipe-delimited table rows AND structured bullet/clause lines
+  // PDF extraction: scan pipe-delimited table rows, multi-space/tab PDF table rows, AND structured key-value/clause lines
   let activePipeHeaders: string[] = [];
 
-  doc.sections.forEach((sec, secIdx) => {
+  getResolvedSections(doc).forEach((sec, secIdx) => {
     const pageNum = sec.pageNumber || secIdx + 1;
     const lines = sec.content
       .split('\n')
@@ -1750,9 +1790,19 @@ export function extractGenericEntitiesFromDocument(
       .filter(Boolean);
 
     lines.forEach((line, lineIdx) => {
-      if (line.includes('|')) {
-        const cells = line
-          .split('|')
+      const hasPipe = line.includes('|');
+      const hasMultiSpaceColumns =
+        !hasPipe &&
+        !line.includes(':') &&
+        /\t|\s{2,}/.test(line) &&
+        line.split(/\t+|\s{2,}/).filter(Boolean).length >= 2 &&
+        (/\d/.test(line) ||
+          /\b(?:no|nomor|kode|klausul|pos|parameter|indikator|nama|topik|item|barang|cabang|status|target|realisasi|anggaran)\b/i.test(
+            line
+          ));
+
+      if (hasPipe || hasMultiSpaceColumns) {
+        const cells = (hasPipe ? line.split('|') : line.split(/\t+|\s{2,}/))
           .map((c) => c.trim())
           .filter(Boolean);
         if (cells.length >= 2) {
@@ -1760,7 +1810,7 @@ export function extractGenericEntitiesFromDocument(
           const isHeaderRow =
             cells.every((c) => !/\d{2,}/.test(c)) &&
             cells.some((c) =>
-              /^(?:no|nomor|kode|klausul|pos|parameter|indikator|nama|topik|item|barang|cabang)/i.test(
+              /^(?:no|nomor|kode|klausul|pos|parameter|indikator|nama|topik|item|barang|cabang|periode|kuartal|uraian|keterangan)/i.test(
                 c
               )
             );
@@ -1772,7 +1822,7 @@ export function extractGenericEntitiesFromDocument(
             return;
           }
 
-          // Parse pipe data row
+          // Parse table data row
           const firstCell = cells[0];
           const secondCell = cells[1] || '';
           const isFirstCodeOrIndex =
@@ -1840,11 +1890,16 @@ export function extractGenericEntitiesFromDocument(
         }
       }
 
-      // Also check structured bullet/key-value lines: e.g. "- Kuartal 3 (Q3 2026): Rp 17.500 Juta" or "- Cabang Surabaya Timur: Rp 5.400 Juta"
+      // Also check structured bullet or plain key-value lines: e.g. "- Kuartal 3 (Q3 2026): Rp 17.500 Juta" or "Total Anggaran: Rp 120.000.000"
       const kvMatch = line.match(
-        /^(?:[-•*]|\d+[.)])\s*([^:]{3,65}):\s*(.+)$/
+        /^(?:[-•*]|\d+[.)])?\s*([A-Za-z0-9][A-Za-z0-9\s/().,_-]{2,65}):\s*(.+)$/
       );
-      if (kvMatch) {
+      if (
+        kvMatch &&
+        !/^(?:catatan|perhatian|peringatan|kesimpulan|rekomendasi|halaman|bagian|lampiran|dokumen)$/i.test(
+          kvMatch[1].trim()
+        )
+      ) {
         const keyLabel = kvMatch[1].trim();
         const valText = kvMatch[2].trim();
         const entityKey = normalizeEntityKey(keyLabel);

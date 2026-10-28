@@ -18,6 +18,7 @@ import {
   matchParticipantsAcrossDocuments,
   parseNumericAndUnit,
 } from './crossDocumentMatcher';
+import { normalizeDocumentPayload } from './documentParser';
 
 export interface HistoricalPoint {
   period: string;
@@ -337,7 +338,7 @@ export function buildPerDocumentSummaries(
       return {
         documentName: doc.name,
         format: doc.format,
-        pageOrSectionCount: doc.pageCount || doc.sections.length || 0,
+        pageOrSectionCount: doc.pageCount || (doc.sections || []).length || 0,
         extractedCharCount: charCount,
         detectedStructure: 'Dokumen Kosong / Tidak Terbaca',
         keyTopics: ['Tidak ada teks terbaca'],
@@ -347,6 +348,7 @@ export function buildPerDocumentSummaries(
       };
     }
 
+    const secCount = (doc.sections || doc.parsedSections || []).length || 1;
     const { entities, headers, entityTypeLabel } =
       extractGenericEntitiesFromDocument(doc);
     const lines = doc.textContent
@@ -356,7 +358,7 @@ export function buildPerDocumentSummaries(
 
     const headline =
       lines[0] ||
-      `Dokumen ${doc.format.toUpperCase()} (${doc.sections.length} bagian)`;
+      `Dokumen ${doc.format.toUpperCase()} (${secCount} bagian)`;
     const keyTopics = entities
       .slice(0, 5)
       .map((e) => e.displayName)
@@ -366,13 +368,13 @@ export function buildPerDocumentSummaries(
       doc.format === 'csv'
         ? `Tabel CSV (${doc.csvRows?.length || 0} baris, ${headers.length} kolom)`
         : entities.length > 0
-        ? `PDF Terstruktur (${doc.sections.length} bagian, ${entities.length} ${entityTypeLabel})`
-        : `Teks Dokumen PDF (${doc.sections.length} halaman/bagian)`;
+        ? `PDF Terstruktur (${secCount} bagian, ${entities.length} ${entityTypeLabel})`
+        : `Teks Dokumen PDF (${secCount} halaman/bagian)`;
 
     return {
       documentName: doc.name,
       format: doc.format,
-      pageOrSectionCount: doc.pageCount || doc.sections.length,
+      pageOrSectionCount: doc.pageCount || secCount,
       extractedCharCount: charCount,
       detectedStructure,
       keyTopics:
@@ -393,10 +395,11 @@ export function buildPerDocumentSummaries(
  * 4. Available data structures and evidence
  */
 export function runDeterministicAnalysis(
-  documents: UploadedDocumentPayload[],
+  rawDocuments: UploadedDocumentPayload[],
   analysisMode: AnalysisModeId,
   customQuestion = ''
 ): AnalysisReport {
+  const documents = rawDocuments.map(normalizeDocumentPayload);
   const docNames = documents.map((d) => d.name);
   const allText = documents
     .map((d) => `${d.name}\n${d.textContent}`)
@@ -798,7 +801,7 @@ function buildUniversalMultiDocumentAnalysis(
       });
 
       // Also scan PDF sections for explicit missing/gap notes, conclusions, and user-question matches
-      doc.sections.forEach((sec, sIdx) => {
+      (doc.sections || doc.parsedSections || []).forEach((sec, sIdx) => {
         const lines = sec.content
           .split('\n')
           .map((l) => l.trim())

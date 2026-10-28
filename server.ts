@@ -26,6 +26,7 @@ import {
 import {
   chunkDocumentSections,
   extractPdfTextAndPages,
+  normalizeDocumentPayload,
 } from './src/utils/documentParser';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -209,7 +210,11 @@ function buildSmartDocumentContextForPrompt(
   question: string,
   maxCharsPerDoc = 45000
 ): string {
-  const chunkedSections = chunkDocumentSections(doc.sections || [], 3200);
+  const normalized = normalizeDocumentPayload(doc);
+  const chunkedSections = chunkDocumentSections(
+    normalized.sections || normalized.parsedSections || [],
+    3200
+  );
   const sanitizedFull = sanitizePromptInjectionInDocumentText(
     doc.textContent || ''
   );
@@ -814,9 +819,13 @@ async function startServer() {
             continue;
           }
         }
+        const normalizedDoc = normalizeDocumentPayload(doc);
         verifiedDocuments.push({
-          ...doc,
-          sections: chunkDocumentSections(doc.sections || [], 3200),
+          ...normalizedDoc,
+          sections: chunkDocumentSections(
+            normalizedDoc.sections || normalizedDoc.parsedSections || [],
+            3200
+          ),
         });
       }
 
@@ -879,7 +888,7 @@ async function startServer() {
                   40000
                 );
                 parts.push({
-                  text: `=== DOKUMEN ${idx + 1}: ${doc.name} (Format: ${doc.format.toUpperCase()}, Jumlah Bagian/Halaman: ${doc.sections.length}) ===\n${smartContext}\n=== AKHIR DOKUMEN ${doc.name} ===`,
+                  text: `=== DOKUMEN ${idx + 1}: ${doc.name} (Format: ${doc.format.toUpperCase()}, Jumlah Bagian/Halaman: ${(doc.sections || []).length}) ===\n${smartContext}\n=== AKHIR DOKUMEN ${doc.name} ===`,
                 });
               });
 

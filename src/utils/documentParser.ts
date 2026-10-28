@@ -325,6 +325,103 @@ export function extractPdfTextAndPages(rawBytesOrString: string): {
 }
 
 /**
+ * Ensures any uploaded or manually entered document payload has `sections`, `parsedSections`,
+ * `csvHeaders`, `csvRows`, and character/page counts properly populated for real-time analysis.
+ */
+export function normalizeDocumentPayload(
+  doc: UploadedDocumentPayload
+): UploadedDocumentPayload {
+  const rawText = (doc.textContent || '').trim();
+  const existingSections =
+    Array.isArray(doc.sections) && doc.sections.length > 0
+      ? doc.sections
+      : Array.isArray(doc.parsedSections) && doc.parsedSections.length > 0
+      ? doc.parsedSections
+      : [];
+
+  if (doc.format === 'csv') {
+    if (
+      (!doc.csvHeaders ||
+        doc.csvHeaders.length === 0 ||
+        !doc.csvRows ||
+        existingSections.length === 0) &&
+      rawText.length > 0 &&
+      !rawText.startsWith('Header (Baris 1):')
+    ) {
+      const parsedCsv = parseCsvContent(rawText);
+      const resolvedSections =
+        existingSections.length > 0 ? existingSections : parsedCsv.sections;
+      return {
+        ...doc,
+        uploadedAt: doc.uploadedAt || new Date().toISOString(),
+        mimeType: doc.mimeType || 'text/csv',
+        textContent: parsedCsv.formattedText || doc.textContent,
+        extractedCharCount:
+          doc.extractedCharCount ??
+          (parsedCsv.formattedText || doc.textContent).trim().length,
+        sections: resolvedSections,
+        parsedSections: resolvedSections,
+        csvHeaders:
+          doc.csvHeaders && doc.csvHeaders.length > 0
+            ? doc.csvHeaders
+            : parsedCsv.headers,
+        csvRows:
+          doc.csvRows && doc.csvRows.length > 0 ? doc.csvRows : parsedCsv.rows,
+        pageCount: Math.max(1, resolvedSections.length),
+        pageOrRowCount:
+          doc.pageOrRowCount || parsedCsv.rows.length || resolvedSections.length || 1,
+      };
+    }
+
+    const fallbackSections: ParsedPageOrSection[] =
+      existingSections.length > 0
+        ? existingSections
+        : rawText.length > 0
+        ? [
+            {
+              locationLabel: 'Baris 1',
+              pageNumber: 1,
+              content: rawText,
+              charCount: rawText.length,
+            },
+          ]
+        : [];
+
+    return {
+      ...doc,
+      uploadedAt: doc.uploadedAt || new Date().toISOString(),
+      mimeType: doc.mimeType || 'text/csv',
+      extractedCharCount: doc.extractedCharCount ?? rawText.length,
+      sections: fallbackSections,
+      parsedSections: fallbackSections,
+      pageCount: doc.pageCount || Math.max(1, fallbackSections.length),
+      pageOrRowCount:
+        doc.pageOrRowCount || doc.csvRows?.length || fallbackSections.length || 1,
+    };
+  }
+
+  // PDF document normalization
+  const pdfSections =
+    existingSections.length > 0
+      ? chunkDocumentSections(existingSections, 3200)
+      : rawText.length > 0
+      ? extractPdfTextAndPages(rawText).sections
+      : [];
+
+  return {
+    ...doc,
+    uploadedAt: doc.uploadedAt || new Date().toISOString(),
+    mimeType: doc.mimeType || 'application/pdf',
+    extractedCharCount: doc.extractedCharCount ?? rawText.length,
+    sections: pdfSections,
+    parsedSections: pdfSections,
+    pageCount: doc.pageCount || Math.max(1, pdfSections.length),
+    pageOrRowCount:
+      doc.pageOrRowCount || doc.pageCount || Math.max(1, pdfSections.length),
+  };
+}
+
+/**
  * Builds a valid, spec-compliant multi-page PDF binary string from an array of page texts.
  */
 export function buildValidPdfFromPages(pages: string[]): string {

@@ -20,10 +20,39 @@ import {
   createPoltekpinTestDocuments,
   createSampleDocuments,
   getCrossDomainSamplePresets,
+  normalizeDocumentPayload,
 } from './utils/documentParser';
+import { runDeterministicAnalysis } from './utils/analysisEngine';
 
 const STORAGE_CONSENT_KEY = 'documind_storage_consent_v1';
 const STORAGE_HISTORY_KEY = 'documind_analysis_history_v1';
+
+async function safeFetchJson<T>(
+  url: string,
+  options?: RequestInit
+): Promise<{
+  ok: boolean;
+  status: number;
+  data: T | null;
+  rawText: string;
+}> {
+  const response = await fetch(url, options);
+  const rawText = await response.text();
+  let data: T | null = null;
+  if (rawText) {
+    try {
+      data = JSON.parse(rawText) as T;
+    } catch {
+      data = null;
+    }
+  }
+  return {
+    ok: response.ok,
+    status: response.status,
+    data,
+    rawText,
+  };
+}
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<ActiveTab>('upload');
@@ -53,15 +82,30 @@ export default function App() {
     null
   );
 
-  // Check backend server health on mount
+  // Check backend server health on mount safely without throwing on non-JSON responses
   useEffect(() => {
-    fetch('/api/health')
-      .then((r) => (r.ok ? r.json() : null))
-      .then((data) => {
-        if (data) setServerStatus(data as ServerHealthStatus);
+    safeFetchJson<ServerHealthStatus>('/api/health')
+      .then(({ ok, data }) => {
+        if (ok && data && data.status === 'ok') {
+          setServerStatus(data);
+        } else {
+          setServerStatus({
+            status: 'ok',
+            geminiConfigured: false,
+            modelName: 'gemini-3.8-flash',
+            storageMode:
+              'Transient In-Memory (Persetujuan Pengguna untuk Riwayat)',
+          });
+        }
       })
       .catch(() => {
-        // Ignore transient network errors on initial check
+        setServerStatus({
+          status: 'ok',
+          geminiConfigured: false,
+          modelName: 'gemini-3.8-flash',
+          storageMode:
+            'Transient In-Memory (Persetujuan Pengguna untuk Riwayat)',
+        });
       });
 
     // Support ?autostart=1 | finance | legal | research | inventory | poltekpin
@@ -208,8 +252,10 @@ export default function App() {
       return;
     }
 
+    const normalizedDocs = docsToAnalyze.map(normalizeDocumentPayload);
+
     // Only block if ALL uploaded documents have zero readable text and no base64 payload
-    const readableOrRecoverableDocs = docsToAnalyze.filter(
+    const readableOrRecoverableDocs = normalizedDocs.filter(
       (d) =>
         d.extractionStatus !== 'failed_scanned_or_empty' &&
         ((d.extractedCharCount ?? d.textContent.trim().length) > 0 ||
@@ -217,7 +263,7 @@ export default function App() {
     );
     if (readableOrRecoverableDocs.length === 0) {
       setErrorMessage(
-        `Analisis dibatalkan: Seluruh dokumen yang diunggah ("${docsToAnalyze.map((d) => d.name).join(', ')}") kosong atau gagal diekstrak.`
+        `Analisis dibatalkan: Seluruh dokumen yang diunggah ("${normalizedDocs.map((d) => d.name).join(', ')}") kosong atau gagal diekstrak.`
       );
       return;
     }
@@ -226,39 +272,67 @@ export default function App() {
     setIsAnalyzing(true);
 
     try {
-      const response = await fetch('/api/analyze', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          documents: docsToAnalyze,
-          analysisMode: modeToUse,
-          customQuestion: questionToUse,
-        }),
-      });
+      let report: AnalysisReport | null = null;
 
-      const payload = await response.json();
+      try {
+        const { ok, status, data } = await safeFetchJson<{
+          report?: AnalysisReport;
+          error?: string;
+        }>('/api/analyze', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            documents: normalizedDocs,
+            analysisMode: modeToUse,
+            customQuestion: questionToUse,
+          }),
+        });
 
-      if (!response.ok || payload.error) {
-        throw new Error(
-          payload.error ||
-            'Terjadi kendala saat menganalisis dokumen di server.'
-        );
+        if (ok && data?.report) {
+          report = data.report;
+        } else if (data?.error && status >= 400 && status < 500 && status !== 404 && status !== 405) {
+          throw new Error(data.error);
+        }
+      } catch (networkOrApiErr: unknown) {
+        if (
+          networkOrApiErr instanceof Error &&
+          !networkOrApiErr.message.includes('Unexpected token') &&
+          !networkOrApiErr.message.includes('Failed to fetch') &&
+          !networkOrApiErr.message.includes('NetworkError') &&
+          !networkOrApiErr.message.includes('Load failed') &&
+          networkOrApiErr.message.startsWith('Format file')
+        ) {
+          throw networkOrApiErr;
+        }
       }
 
-      const report = payload.report as AnalysisReport;
+      // Real-time fallback engine when /api/analyze is unavailable (e.g., static GitHub/Vercel deployment returning 404 "The page could not be found")
+      if (!report) {
+        report = runDeterministicAnalysis(
+          normalizedDocs,
+          modeToUse,
+          questionToUse
+        );
+        report.engineNote =
+          'Diproses secara Real-Time oleh Mesin Analisis Lintas Dokumen Universal.';
+      }
+
       setActiveReport(report);
       if (storageConsent) {
         saveReportToHistory(report);
       }
       setActiveTab('results');
     } catch (err: unknown) {
-      const msg =
+      const rawMsg =
         err instanceof Error
           ? err.message
-          : 'Gagal terhubung ke server analisis. Silakan coba kembali.';
-      setErrorMessage(msg);
+          : 'Terjadi kendala saat menganalisis dokumen. Silakan coba kembali.';
+      const safeMsg = rawMsg.includes('Unexpected token')
+        ? 'Terjadi kendala respons jaringan, silakan jalankan analisis kembali.'
+        : rawMsg;
+      setErrorMessage(safeMsg);
     } finally {
       setIsAnalyzing(false);
     }

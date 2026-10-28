@@ -476,4 +476,73 @@ test('Humanisasi Teks & Angka: menghilangkan garis bawah (underscore) dan desima
   assert.ok(visual.trendPoints.length >= 3);
 });
 
+test('Pemrosesan Real-Time Dokumen Unggahan: menangani payload browser dengan parsedSections, tabel spasi ganda, dan pasangan Key: Value tanpa error', () => {
+  const uploadedPdfA = {
+    id: 'realtime-pdf-1',
+    name: 'Laporan_Proyek_A.pdf',
+    format: 'pdf' as const,
+    sizeBytes: 1420,
+    textContent: [
+      '[Halaman 1]',
+      'Pos Anggaran: Rp 850 Juta',
+      'Durasi Pelaksanaan: 120 Hari Kalender',
+      'Cabang Utama  Rp 420 Juta  Aktif',
+      '[Halaman 2]',
+      'Cadangan Operasional: Belum Tersedia',
+    ].join('\n'),
+    extractedCharCount: 165,
+    extractionStatus: 'success' as const,
+    parsedSections: [
+      {
+        locationLabel: 'Halaman 1',
+        pageNumber: 1,
+        content: [
+          'Pos Anggaran: Rp 850 Juta',
+          'Durasi Pelaksanaan: 120 Hari Kalender',
+          'Cabang Utama  Rp 420 Juta  Aktif',
+        ].join('\n'),
+        charCount: 125,
+      },
+      {
+        locationLabel: 'Halaman 2',
+        pageNumber: 2,
+        content: 'Cadangan Operasional: Belum Tersedia',
+        charCount: 40,
+      },
+    ],
+  };
+
+  const uploadedPdfB = {
+    id: 'realtime-pdf-2',
+    name: 'Adendum_Proyek_A.pdf',
+    format: 'pdf' as const,
+    sizeBytes: 1380,
+    textContent: [
+      '[Halaman 1]',
+      'Pos Anggaran: Rp 920 Juta',
+      'Durasi Pelaksanaan: 90 Hari Kalender',
+      'Cabang Utama  Rp 420 Juta  Aktif',
+    ].join('\n'),
+    extractedCharCount: 120,
+    extractionStatus: 'success' as const,
+  };
+
+  for (const mode of [
+    'synthesis',
+    'comparison',
+    'gap_analysis',
+    'estimation',
+  ] as const) {
+    const report = runDeterministicAnalysis(
+      [uploadedPdfA, uploadedPdfB],
+      mode,
+      'Bandingkan pos anggaran dan durasi pelaksanaan pada kedua dokumen.'
+    );
+    assert.ok(report.executiveSummary.length > 15);
+    assert.ok(report.explicitFacts.length > 0);
+    assert.ok(report.comparisonMatrix?.rows.length && report.comparisonMatrix.rows.length >= 2);
+  }
+});
+
+
 

@@ -29,6 +29,7 @@ import {
 } from '../types/analysis';
 import {
   extractPdfTextAndPages,
+  normalizeDocumentPayload,
   parseCsvContent,
 } from '../utils/documentParser';
 import * as pdfjsLib from 'pdfjs-dist';
@@ -88,6 +89,16 @@ async function extractTextWithPdfJs(arrayBuffer: ArrayBuffer): Promise<{
     const reconstructedLines = lineBuckets
       .map((bucket) => {
         bucket.items.sort((a, b) => a.x - b.x);
+        if (bucket.items.length >= 2) {
+          let lineStr = bucket.items[0].text;
+          for (let idx = 1; idx < bucket.items.length; idx++) {
+            const prev = bucket.items[idx - 1];
+            const curr = bucket.items[idx];
+            const gap = curr.x - (prev.x + prev.text.length * 4.2);
+            lineStr += gap > 14 ? ` | ${curr.text}` : ` ${curr.text}`;
+          }
+          return lineStr;
+        }
         return bucket.items.map((it) => it.text).join('  ');
       })
       .filter((line) => line.trim().length > 0);
@@ -114,7 +125,10 @@ async function extractTextWithPdfJs(arrayBuffer: ArrayBuffer): Promise<{
   const textContent = sections
     .map((s) => `[${s.locationLabel}]\n${s.content}`)
     .join('\n\n');
-  const extractedCharCount = sections.reduce((sum, s) => sum + s.charCount, 0);
+  const extractedCharCount = sections.reduce(
+    (sum, s) => sum + (s.charCount ?? s.content.length),
+    0
+  );
 
   return {
     textContent,
@@ -149,10 +163,14 @@ async function parseUploadedFile(file: File): Promise<UploadedDocumentPayload> {
       name: file.name,
       format: 'csv',
       sizeBytes: file.size,
+      uploadedAt: new Date().toISOString(),
+      mimeType: 'text/csv',
+      pageCount: Math.max(1, parsedCsv.sections.length),
       pageOrRowCount: parsedCsv.rows.length,
       textContent: parsedCsv.formattedText,
       extractedCharCount: charCount,
-      extractionStatus: charCount > 0 ? 'success' : 'failed_scanned_or_empty',
+      extractionStatus: charCount > 0 ? 'ready' : 'failed_scanned_or_empty',
+      sections: parsedCsv.sections,
       parsedSections: parsedCsv.sections,
       csvHeaders: parsedCsv.headers,
       csvRows: parsedCsv.rows,
@@ -163,18 +181,23 @@ async function parseUploadedFile(file: File): Promise<UploadedDocumentPayload> {
   try {
     const pdfJsResult = await extractTextWithPdfJs(buffer);
     if (pdfJsResult.extractedCharCount > 0) {
+      const pageCount = Math.max(
+        1,
+        pdfJsResult.pageCount || pdfJsResult.sections.length
+      );
       return {
         id: `doc-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
         name: file.name,
         format: 'pdf',
         sizeBytes: file.size,
-        pageOrRowCount: Math.max(
-          1,
-          pdfJsResult.pageCount || pdfJsResult.sections.length
-        ),
+        uploadedAt: new Date().toISOString(),
+        mimeType: 'application/pdf',
+        pageCount,
+        pageOrRowCount: pageCount,
         textContent: pdfJsResult.textContent,
         extractedCharCount: pdfJsResult.extractedCharCount,
-        extractionStatus: 'success',
+        extractionStatus: 'ready',
+        sections: pdfJsResult.sections,
         parsedSections: pdfJsResult.sections,
       };
     }
@@ -185,32 +208,71 @@ async function parseUploadedFile(file: File): Promise<UploadedDocumentPayload> {
   const rawLatin1 = new TextDecoder('latin1').decode(buffer);
   const fallbackPdf = extractPdfTextAndPages(rawLatin1);
   if (fallbackPdf.extractedCharCount > 0) {
+    const pageCount = Math.max(1, fallbackPdf.sections.length);
     return {
       id: `doc-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
       name: file.name,
       format: 'pdf',
       sizeBytes: file.size,
-      pageOrRowCount: Math.max(1, fallbackPdf.sections.length),
+      uploadedAt: new Date().toISOString(),
+      mimeType: 'application/pdf',
+      pageCount,
+      pageOrRowCount: pageCount,
       textContent: fallbackPdf.textContent,
       extractedCharCount: fallbackPdf.extractedCharCount,
-      extractionStatus: 'success',
+      extractionStatus: 'ready',
+      sections: fallbackPdf.sections,
       parsedSections: fallbackPdf.sections,
     };
   }
 
   const canAttachMultimodal = file.size > 0 && file.size <= 12 * 1024 * 1024;
+  const base64Data = canAttachMultimodal
+    ? arrayBufferToBase64(buffer)
+    : undefined;
+
+  if (base64Data) {
+    try {
+      const resp = await fetch('/api/extract-document', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: file.name,
+          format: 'pdf',
+          sizeBytes: file.size,
+          base64Data,
+        }),
+      });
+      const respText = await resp.text();
+      if (resp.ok && respText) {
+        const parsedJson = JSON.parse(respText) as {
+          document?: UploadedDocumentPayload;
+        };
+        if (parsedJson?.document) {
+          return normalizeDocumentPayload(parsedJson.document);
+        }
+      }
+    } catch {
+      // Ignore if running in static/serverless environment without /api/extract-document
+    }
+  }
+
   return {
     id: `doc-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
     name: file.name,
     format: 'pdf',
     sizeBytes: file.size,
+    uploadedAt: new Date().toISOString(),
+    pageCount: 1,
     pageOrRowCount: 1,
     textContent: '',
     extractedCharCount: 0,
+    sections: [],
+    parsedSections: [],
     extractionStatus: canAttachMultimodal
       ? 'ocr_fallback'
       : 'failed_scanned_or_empty',
-    base64Data: canAttachMultimodal ? arrayBufferToBase64(buffer) : undefined,
+    base64Data,
     mimeType: 'application/pdf',
   };
 }
@@ -464,19 +526,22 @@ export const UploadWorkspace: React.FC<UploadWorkspaceProps> = ({
       : `${manualName.trim()}.${manualFormat}`;
 
     const trimmedText = manualContent.trim();
-    const newDoc: UploadedDocumentPayload = {
+    const newDoc = normalizeDocumentPayload({
       id: `manual-${Date.now()}`,
       name: cleanName,
       format: manualFormat,
       sizeBytes: new Blob([trimmedText]).size,
+      uploadedAt: new Date().toISOString(),
+      mimeType: manualFormat === 'csv' ? 'text/csv' : 'application/pdf',
       pageOrRowCount:
         manualFormat === 'csv'
           ? Math.max(1, trimmedText.split(/\r?\n/).length - 1)
           : Math.max(1, (trimmedText.match(/\[Halaman\s+\d+\]/gi) || []).length),
       textContent: trimmedText,
       extractedCharCount: trimmedText.length,
-      extractionStatus: 'success',
-    };
+      extractionStatus: 'ready',
+      sections: [],
+    });
 
     onAddDocuments([newDoc]);
     setManualName('');
@@ -891,9 +956,24 @@ export const UploadWorkspace: React.FC<UploadWorkspaceProps> = ({
                             value={doc.textContent}
                             onChange={(e) => {
                               const val = e.target.value;
+                              const normalized = normalizeDocumentPayload({
+                                ...doc,
+                                textContent: val,
+                                extractedCharCount: val.trim().length,
+                                sections: [],
+                                parsedSections: [],
+                                csvHeaders: undefined,
+                                csvRows: undefined,
+                              });
                               onUpdateDocument(doc.id, {
                                 textContent: val,
                                 extractedCharCount: val.trim().length,
+                                sections: normalized.sections,
+                                parsedSections: normalized.parsedSections,
+                                csvHeaders: normalized.csvHeaders,
+                                csvRows: normalized.csvRows,
+                                pageCount: normalized.pageCount,
+                                pageOrRowCount: normalized.pageOrRowCount,
                                 extractionStatus:
                                   val.trim().length > 0
                                     ? 'ready'

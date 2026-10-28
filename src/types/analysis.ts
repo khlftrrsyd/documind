@@ -9,7 +9,9 @@ export type DocumentFormat = 'pdf' | 'csv';
 export type DocumentExtractionStatus =
   | 'extracting'
   | 'ready'
+  | 'success'
   | 'ocr_completed'
+  | 'ocr_fallback'
   | 'empty_or_unreadable'
   | 'failed_scanned_or_empty'
   | 'error';
@@ -67,14 +69,15 @@ export interface UploadedDocumentPayload {
   name: string;
   format: DocumentFormat;
   sizeBytes: number;
-  uploadedAt: string;
+  uploadedAt?: string;
   /** Extracted readable text or formatted CSV text */
   textContent: string;
   /** Optional base64-encoded file bytes for native PDF analysis via server pdfjs & Gemini inlineData */
   base64Data?: string;
-  mimeType: string;
+  mimeType?: string;
   /** Structured pages or CSV row groups for source inspection */
-  sections: ParsedPageOrSection[];
+  sections?: ParsedPageOrSection[];
+  parsedSections?: ParsedPageOrSection[];
   /** Optional parsed CSV rows if format === 'csv' */
   csvHeaders?: string[];
   csvRows?: Record<string, string>[];

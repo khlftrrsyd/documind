@@ -146,14 +146,19 @@ export function compactValueLabel(raw: string): string {
 }
 
 /**
- * Shortens a document title to 2-3 key words for graphic node labels.
+ * Shortens a document title while preserving distinguishing words (like Induk, Adendum, Audit, ERP, Opname).
  */
 export function shortDocLabel(docName: string): string {
   const human = humanizeDocTitle(docName)
     .replace(/\s*\((?:PDF|CSV|TXT|TSV)\)\s*$/i, '')
     .trim();
+  if (human.length <= 30) return human;
   const words = human.split(/\s+/);
   if (words.length <= 3) return human;
+  const nonYearWords = words.filter((w) => !/^20\d{2}$/.test(w));
+  if (nonYearWords.length >= 3) {
+    return `${nonYearWords[0]} ${nonYearWords[1]} ${nonYearWords[nonYearWords.length - 1]}`;
+  }
   return words.slice(0, 3).join(' ');
 }
 
@@ -266,8 +271,17 @@ export function buildVisualAnalyticsData(
       const diffFormatted = diff.toLocaleString('id-ID', {
         maximumFractionDigits: 2,
       });
-      if (/rp|juta|miliar/i.test(conflict.documentA.reportedValue)) {
+      if (/\bjuta\b/i.test(conflict.documentA.reportedValue)) {
         deltaBadge = `Selisih Rp ${diffFormatted} Juta`;
+      } else if (/\bmiliar\b/i.test(conflict.documentA.reportedValue)) {
+        deltaBadge = `Selisih Rp ${diffFormatted} Miliar`;
+      } else if (/\brp\b/i.test(conflict.documentA.reportedValue)) {
+        deltaBadge =
+          diff >= 1_000_000
+            ? `Selisih Rp ${(diff / 1_000_000).toLocaleString('id-ID', {
+                maximumFractionDigits: 2,
+              })} Juta`
+            : `Selisih Rp ${diffFormatted}`;
       } else if (/unit/i.test(conflict.documentA.reportedValue)) {
         deltaBadge = `Selisih ${diffFormatted} Unit`;
       } else if (/%/.test(conflict.documentA.reportedValue)) {
@@ -285,7 +299,9 @@ export function buildVisualAnalyticsData(
 
     barComparisons.push({
       id: conflict.id,
-      title: cleanDisplayText(conflict.topic),
+      title: cleanDisplayText(conflict.topic)
+        .replace(/\s*\((?:Selisih|Perubahan)\s*:[^)]+\)\s*$/i, '')
+        .trim(),
       category: `Dampak ${conflict.severity}`,
       docALabel: shortDocLabel(conflict.documentA.documentName),
       docBLabel: shortDocLabel(conflict.documentB.documentName),
